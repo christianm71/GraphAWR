@@ -1,7 +1,6 @@
 package MyAWR;
 use base qw(MyOracle);
 
-use strict;
 use Data::Dumper;
 use Common;
 

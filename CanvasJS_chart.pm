@@ -1,6 +1,5 @@
 package CanvasJS_chart;
 
-use strict;
 use Attributes;
 use CanvasJS_data;
 use Common;

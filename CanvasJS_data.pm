@@ -1,6 +1,5 @@
 package CanvasJS_data;
 
-use strict;
 use Attributes;
 
 our $common=Common->new();

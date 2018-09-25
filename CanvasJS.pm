@@ -1,6 +1,5 @@
 package CanvasJS;
 
-use strict;
 use CanvasJS_chart;
 
 # ========================================================================

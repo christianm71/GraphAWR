@@ -1,6 +1,5 @@
 package MyOracle;
 
-use strict;
 use DBI;
 use DBD::Oracle qw(:ora_session_modes);
 
