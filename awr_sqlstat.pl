@@ -8,12 +8,21 @@ BEGIN {
   if (($ORACLE_HOME) && (! ($perlpath=~m/^$ORACLE_HOME/))) {
     my $root=$0;
     $root=~s/\/[^\/]+$//;
-    $root=`cd $root; pwd`;
+    # If $root becomes empty (e.g. $0 was "script.pl"), `cd ''` might be an issue.
+    # However, `cd` with an empty argument often defaults to home, or `cd .` for current.
+    # Quoting $root handles spaces/special chars if any.
+    $root=`cd '$root'; pwd`;
     chomp($root);
-    my $cmd="$ORACLE_HOME/perl/bin/perl -I $root -I $root/MyOracle $0";
-    foreach my $arg (@ARGV) { $arg=~s/\$/\\\$/g; $cmd.=" \"$arg\""; }
-    system($cmd);
-    exit($?);
+
+    my $executable = "$ORACLE_HOME/perl/bin/perl";
+    my @perl_args = (
+        "-I", $root,
+        "-I", "$root/MyOracle", # MyOracle is a directory relative to $root
+        $0,                     # The script name
+        @ARGV                   # The original arguments to the script
+    );
+    system($executable, @perl_args);
+    exit($? >> 8); # Use the actual exit code of the re-executed script
   }
 }
 
@@ -35,7 +44,7 @@ sub help {
                    [-f <local_datafile>]  use data from file
                    [-w]  write results in a file\n\n";
 
-  exit(1);
+  die;
 }
 
 # ============================================================================================================
@@ -57,7 +66,7 @@ while ($ARGV[$i]) {
   elsif ($ARGV[$i] eq "-f")             { $local_datafile=$ARGV[$i+1]; $i++; }
   elsif ($ARGV[$i] eq "-w")             { $write_into_file=1;                }
   elsif ($ARGV[$i] eq "-help")          { help();                            }
-  else                                  { help();                            }
+  else                                  { print STDERR "Invalid argument: \$ARGV[\$i]\n"; help(); }
 
   $i++;
 }

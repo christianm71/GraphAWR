@@ -1,7 +1,7 @@
 package MyAWR;
 use base qw(MyOracle);
 
-use Data::Dumper;
+use Storable qw(nstore_fd fd_retrieve);
 use Common;
 
 # ============================================================================================================
@@ -171,18 +171,26 @@ sub dump_data {
 
   my $fh;
   if ($gzip eq "yes") {
-    open $fh, "|-", "gzip -c > $file_name" || return 1;
+    open $fh, "|-", "gzip -c > $file_name" or die "Cannot open gzip pipe to $file_name: $!";
   }
   else {
-    open($fh, ">$file_name") || return 1;
+    open($fh, ">$file_name") or die "Cannot open file $file_name for writing: $!";
   }
 
   my $snapshot_dates=$self->{snapshot_dates};
 
-  $Data::Dumper::Sortkeys = 1;
-  print $fh Data::Dumper->Dump([$snapshot_dates], ["*snapshot_dates"]);
-  print $fh Data::Dumper->Dump([$data], ["*data"]);
-  print $fh Data::Dumper->Dump([\%database_info], ["*database_info"]);
+  # $Data::Dumper::Sortkeys = 1; # Not needed for Storable
+  # print $fh Data::Dumper->Dump([$snapshot_dates], ["*snapshot_dates"]);
+  # print $fh Data::Dumper->Dump([$data], ["*data"]);
+  # print $fh Data::Dumper->Dump([\%database_info], ["*database_info"]);
+  eval {
+    nstore_fd([$snapshot_dates, $data, \%database_info], $fh);
+  };
+  if ($@) {
+    close $fh;
+    # TODO: Consider logging the error $@
+    return 1; # Indicate error
+  }
   close $fh;
 
   return 0;
@@ -192,49 +200,53 @@ sub dump_data {
 sub read_data_from_file {
   my ($self, $datafile)=@_;
 
-  my %snapshot_dates;
-  my %data;
-  my %database_info;
-
-  my $buffer="";
-  my $fh;
-
   my $self_data=$self->{data};
   my $self_snapshot_dates=$self->{snapshot_dates};
 
+  my $fh;
   if ($datafile=~m/\.gz$/) {
     # ----- si le fichier est compresse -----
-    open $fh, "-|", "gzip", "-dc", $datafile || return 1;
-    while (<$fh>) { $buffer.=$_; }
-    close($fh);
+    open $fh, "-|", "gzip -dc \"$datafile\"" or die "Cannot open gzip process for $datafile: $!";
   }
   else {
     # ----- si le fichier n'est pas compresse -----
-    open($fh, $datafile) || return 1;
-    while (<$fh>) { $buffer.=$_; }
-    close($fh);
+    open $fh, "<", $datafile or die "Cannot open file $datafile for reading: $!";
   }
 
-  eval($buffer);
+  my $retrieved_data;
+  eval {
+    $retrieved_data = fd_retrieve($fh);
+  };
+  if ($@) {
+    close $fh;
+    # TODO: Consider logging the error $@
+    return 1; # Indicate error
+  }
+  close $fh;
+
+  my ($retrieved_snapshot_dates_ref, $retrieved_data_hash_ref, $retrieved_database_info_ref) = @$retrieved_data;
 
   # ----- verification du meme dbid, instance_number, view -----
-  $self->{view}=$self->{view} || $database_info{view};                                   # si la connexion a la base n'a pas pu se faire
-  $self->{instance_number}=$self->{instance_number} || $database_info{instance_number};  # si la connexion a la base n'a pas pu se faire
-  $self->{dbid}=$self->{dbid} || $database_info{dbid};                                   # si la connexion a la base n'a pas pu se faire
+  # Initialize $self properties if they are not already set, using data from the file.
+  $self->{view}            = $self->{view}            || $retrieved_database_info_ref->{view};
+  $self->{instance_number} = $self->{instance_number} || $retrieved_database_info_ref->{instance_number};
+  $self->{dbid}            = $self->{dbid}            || $retrieved_database_info_ref->{dbid};
 
-  if (   (($self->{view})            && ($self->{view}            ne $database_info{view}))
-      || (($self->{instance_number}) && ($self->{instance_number} ne $database_info{instance_number}))
-      || (($self->{dbid})            && ($self->{dbid}            ne $database_info{dbid}))) { return 2; }
+  # Now perform the verification checks.
+  if (   (($self->{view})            && ($self->{view}            ne $retrieved_database_info_ref->{view}))
+      || (($self->{instance_number}) && ($self->{instance_number} ne $retrieved_database_info_ref->{instance_number}))
+      || (($self->{dbid})            && ($self->{dbid}            ne $retrieved_database_info_ref->{dbid}))) { return 2; }
 
-  %$self_data = (%$self_data, %data);
-  %$self_snapshot_dates = (%$self_snapshot_dates, %snapshot_dates);
+  # Merge the retrieved data into the object's existing data structures.
+  %$self_data = (%$self_data, %$retrieved_data_hash_ref);
+  %$self_snapshot_dates = (%$self_snapshot_dates, %$retrieved_snapshot_dates_ref);
 
   # ----- alimentation des donnees relatives a la base -----
-  $self->{dbid}=$database_info{dbid};
-  $self->{dbname}=$database_info{dbname};
-  $self->{hostname}=$database_info{hostname};
-  $self->{instance_name}=$database_info{instance_name};
-  $self->{instance_number}=$database_info{instance_number};
+  $self->{dbid}=$retrieved_database_info_ref->{dbid};
+  $self->{dbname}=$retrieved_database_info_ref->{dbname};
+  $self->{hostname}=$retrieved_database_info_ref->{hostname};
+  $self->{instance_name}=$retrieved_database_info_ref->{instance_name};
+  $self->{instance_number}=$retrieved_database_info_ref->{instance_number};
 
   return 0;
 }
@@ -300,16 +312,17 @@ sub request_data {
 
       # ----- si tous les deltas sont >= 0 -----
       if ($flag) {
-        my $ref="\$data";
-        foreach $col (@array_index_columns) {
-          $ref=sprintf("%s->{\"%s\"}", $ref, $row->{$col} || $col);
-        }
-        foreach $col (@array_delta_columns) {
-          my $value=$delta{$col};   $value=~s/\\/\\\\/g;       # pour ne pas que le \ suivi d'un caractere ne soit interprete comme un regexp
-                                    $value=~s/([@\$]+)/\\$1/g; # pour ne pas que le $ ou @ soit interprete
+        my $current_level_ref = $data;
+        foreach my $index_col_name (@array_index_columns) {
+            my $key_value = $row->{$index_col_name} || $index_col_name; # Use column name if row value is false
 
-          my $cmd=sprintf("%s->{\"%s\"}=\"%s\";", $ref, $col, $value);
-          eval($cmd);
+            unless (exists $current_level_ref->{$key_value} && defined $current_level_ref->{$key_value} && ref $current_level_ref->{$key_value} eq 'HASH') {
+                $current_level_ref->{$key_value} = {}; # Create new hash if not exists or not a hash ref
+            }
+            $current_level_ref = $current_level_ref->{$key_value};
+        }
+        foreach my $delta_col_name (@array_delta_columns) {
+            $current_level_ref->{$delta_col_name} = $delta{$delta_col_name}; # Assign directly
         }
       }
 
@@ -317,21 +330,18 @@ sub request_data {
     }
     else {
       # ----- les donnees sans faire le delta entre les lignes -----
-      my $ref="\$data";
-      foreach $col (@array_index_columns) {
-        my $v=$row->{$col};
-        if (! defined($v)) { $v=""; }
-        $ref=sprintf("%s->{\"%s\"}", $ref, $v);
+      my $current_level_ref = $data;
+      foreach my $index_col_name (@array_index_columns) {
+          my $key_value = defined $row->{$index_col_name} ? $row->{$index_col_name} : ""; # Use empty string if row value is undefined
+
+          unless (exists $current_level_ref->{$key_value} && defined $current_level_ref->{$key_value} && ref $current_level_ref->{$key_value} eq 'HASH') {
+              $current_level_ref->{$key_value} = {}; # Create new hash if not exists or not a hash ref
+          }
+          $current_level_ref = $current_level_ref->{$key_value};
       }
-      foreach $col (@array_columns) {
-        if (! defined($row->{$col})) { $row->{$col}=""; }
-
-        my $value=$row->{$col};  $value=~s/\\/\\\\/g;       # pour ne pas que le \ suivi d'un caractere ne soit interprete comme un regexp
-                                 $value=~s/([@\$]+)/\\$1/g; # pour ne pas que le $ ou @ soit interprete
-
-        #$row->{$col}=~s/([@\$]+)/\\$1/g;
-        my $cmd=sprintf("%s->{\"%s\"}=\"%s\";", $ref, $col, $value);
-        eval($cmd);
+      foreach my $value_col_name (@array_columns) {
+          my $value_to_assign = defined $row->{$value_col_name} ? $row->{$value_col_name} : ""; # Assign empty string if undefined
+          $current_level_ref->{$value_col_name} = $value_to_assign; # Assign directly
       }
     }
   }
@@ -354,8 +364,7 @@ sub check_open_db {
   $message=~s/{OPEN_MODE}/$open_mode/g;
 
   if (! ($db_informations->{OPEN_MODE}=~/READ/)) {
-    print $message;
-    exit($rc);
+    die $message;
   }
 }
 

@@ -36,10 +36,12 @@ sub connect {
   my ($self)=@_;
 
   delete $ENV{TWO_TASK};
-  $self->{dbh} = DBI->connect("dbi:Oracle:", "", "", {ora_session_mode=>ORA_SYSDBA}) || return 1;
+  # DBI connect will die on error due to RaiseError=>1
+  $self->{dbh} = DBI->connect("dbi:Oracle:", "", "", {RaiseError=>1, PrintError=>0, ora_session_mode=>ORA_SYSDBA});
 
-  if ($self->_request_db_informations() == 0) { return 1; }
-  return 0;
+  # _request_db_informations will die on error if _request dies
+  $self->_request_db_informations();
+  return 0; # Signifies success
 }
 
 # ============================================================================================================
@@ -48,8 +50,8 @@ sub _request {
 
   my $dbh=$self->{dbh};
 
-  my $sth=$dbh->prepare($query) || return 0;
-  $sth->execute() || return 0;
+  my $sth=$dbh->prepare($query) or die "DBI prepare failed for query [$query]: " . $dbh->errstr;
+  $sth->execute() or die "DBI execute failed for query [$query]: " . $sth->errstr;
 
   return $sth;
 }
@@ -72,7 +74,8 @@ sub _request_db_informations {
                instance_number=decode($instance_number, 0, (select instance_number from v\$instance), $instance_number)";
 
   my $sth=$self->_request($query);
-  if (! $sth) { return 0; }
+  # If _request failed, it would have died already.
+  # if (! $sth) { return 0; } # This check is no longer for _request failure.
 
   my $row = $sth->fetchrow_hashref();
 
@@ -102,7 +105,8 @@ sub get_db_informations {
                v\$database";
 
   my $sth=$self->_request($query);
-  if (! $sth) { return 0; }
+  # If _request failed, it would have died already.
+  # if (! $sth) { return 0; } # This check is no longer for _request failure.
 
   return $sth->fetchrow_hashref();
 }
@@ -119,7 +123,8 @@ sub get_datafiles {
                dba_data_files";
 
   my $sth=$self->_request($query);
-  if (! $sth) { return 0; }
+  # If _request failed, it would have died already.
+  # if (! $sth) { return 0; } # This check is no longer for _request failure.
 
   while (my $row = $sth->fetchrow_hashref()) {
     my $file_id=$row->{FILE_ID};
